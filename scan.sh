@@ -37,21 +37,31 @@ check_wave1_files() {
     if [ -n "$found" ]; then
       log_fail "Wave 1/2 payload file: ${name}"
       log_info "Path: ${found}"
+    else
+      log_ok "${name} not found"
     fi
   done
 }
 
-WAVE4_HASH="ab4fcadaec49c03278063dd269ea5eef82d24f2124a8e15d7b90f2fea29c44d9c0dc2caf"
+# SHA256 of the known-malicious router_init.js (CVE-2026-45321) — 64 hex chars
+WAVE4_HASH="ab4fcadaec49c03278063dd269ea5eef82d24f2124a8e15d7b90f2fea29c44d9"
 
 check_wave4_files() {
   if [ -f "${SCAN_DIR}/.claude/router_runtime.js" ]; then
     log_fail "Wave 4 persistence hook: .claude/router_runtime.js"
+  else
+    log_ok ".claude/router_runtime.js not present"
   fi
   if [ -f "${SCAN_DIR}/.vscode/setup.mjs" ]; then
     log_fail "Wave 4 persistence hook: .vscode/setup.mjs"
+  else
+    log_ok ".vscode/setup.mjs not present"
   fi
   found=$(find "${SCAN_DIR}" -name "router_init.js" -not -path "*/node_modules/*" 2>/dev/null || true)
   if [ -n "$found" ]; then
+    oldIFS="$IFS"
+    IFS='
+'
     for f in $found; do
       sha=$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1 || true)
       if [ "$sha" = "$WAVE4_HASH" ]; then
@@ -62,12 +72,22 @@ check_wave4_files() {
         log_info "Path: ${f}  SHA256: ${sha}"
       fi
     done
+    IFS="$oldIFS"
+  else
+    log_ok "No router_init.js found outside node_modules"
   fi
 }
 
 check_preinstall() {
   found=$(find "${SCAN_DIR}" -name "package.json" -not -path "*/node_modules/*" \
     -exec grep -l '"preinstall"' {} \; 2>/dev/null || true)
+  if [ -z "$found" ]; then
+    log_ok "No preinstall scripts found"
+    return
+  fi
+  oldIFS="$IFS"
+  IFS='
+'
   for f in $found; do
     if grep -qE "setup_bun|bun_environment|bun\.sh/install" "$f" 2>/dev/null; then
       log_fail "Malicious preinstall script in: ${f}"
@@ -75,14 +95,18 @@ check_preinstall() {
       log_warn "preinstall script found — review manually: ${f}"
     fi
   done
+  IFS="$oldIFS"
 }
 
 check_runner_name() {
   found=$(grep -r "SHA1HULUD" "${SCAN_DIR}" \
     --include="*.yml" --include="*.yaml" --include="*.json" --include="*.sh" \
+    --exclude-dir=node_modules --exclude-dir=.git \
     -l 2>/dev/null || true)
   if [ -n "$found" ]; then
     log_fail "SHA1HULUD runner name in: ${found}"
+  else
+    log_ok "SHA1HULUD runner name not found"
   fi
 }
 
@@ -91,62 +115,92 @@ check_exfil_domains() {
     found=$(grep -r "$domain" "${SCAN_DIR}" \
       --include="*.js" --include="*.ts" --include="*.json" --include="*.sh" \
       --include="*.mjs" --include="*.cjs" \
+      --exclude-dir=node_modules --exclude-dir=.git \
       -l 2>/dev/null || true)
     if [ -n "$found" ]; then
       log_fail "Exfil domain '${domain}' in: ${found}"
+    else
+      log_ok "Exfil domain '${domain}' not found"
     fi
   done
 }
 
 check_claude_hooks() {
+  clean=1
   for f in "${SCAN_DIR}/.claude/settings.json" "${SCAN_DIR}/.claude/settings.local.json"; do
     if [ -f "$f" ]; then
       if grep -qE "shellSnapshot|router_runtime|bun_environment|setup_bun" "$f" 2>/dev/null; then
         log_fail "Suspicious Claude Code hook in: ${f}"
         log_info "Review shellSnapshot / hook entries for malicious scripts"
+        clean=0
       fi
     fi
   done
+  [ "$clean" -eq 1 ] && log_ok "Claude Code settings hooks look clean"
 }
 
 TANSTACK_COMPROMISED="1.169.5 1.169.8"
 check_tanstack_installs() {
   rt="${SCAN_DIR}/node_modules/@tanstack/react-router/package.json"
   if [ -f "$rt" ] && command -v node >/dev/null 2>&1; then
-    ver=$(node -e "try{process.stdout.write(require('${rt}').version||'')}catch(e){}" 2>/dev/null || true)
-    for bad in $TANSTACK_COMPROMISED; do
-      if [ "$ver" = "$bad" ]; then
+    ver=$(PKGJSON="$rt" node -e \
+      "try{process.stdout.write(require(process.env.PKGJSON).version||'')}catch(e){}" \
+      2>/dev/null || true)
+    case "$ver" in
+      "1.169.5"|"1.169.8")
         log_fail "COMPROMISED @tanstack/react-router@${ver} installed (CVE-2026-45321)"
-      fi
-    done
+        ;;
+      *)
+        log_ok "@tanstack/react-router@${ver} — not a known compromised version"
+        ;;
+    esac
+  else
+    log_ok "@tanstack/react-router not installed"
   fi
   mis="${SCAN_DIR}/node_modules/@mistralai/mistralai/package.json"
   if [ -f "$mis" ] && command -v node >/dev/null 2>&1; then
-    ver=$(node -e "try{process.stdout.write(require('${mis}').version||'')}catch(e){}" 2>/dev/null || true)
+    ver=$(PKGJSON="$mis" node -e \
+      "try{process.stdout.write(require(process.env.PKGJSON).version||'')}catch(e){}" \
+      2>/dev/null || true)
     case "$ver" in
       "2.2.2"|"2.2.3"|"2.2.4")
         log_fail "COMPROMISED @mistralai/mistralai@${ver} installed (Wave 4)"
         ;;
+      *)
+        log_ok "@mistralai/mistralai@${ver} — not a known compromised version"
+        ;;
     esac
+  else
+    log_ok "@mistralai/mistralai not installed"
   fi
 }
 
 check_pinning() {
+  unpinned=0
   found=$(find "${SCAN_DIR}" -name "package.json" \
     -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null || true)
+  oldIFS="$IFS"
+  IFS='
+'
   for f in $found; do
     if grep -qE '"[^"]+": "(\^|~|>=|<=|>|<|\*)' "$f" 2>/dev/null; then
       log_warn "Unpinned dep range in: ${f}"
+      unpinned=$((unpinned + 1))
     fi
   done
+  IFS="$oldIFS"
+  [ "$unpinned" -eq 0 ] && log_ok "All package.json dependencies appear pinned"
 }
 
 check_bun_curl_install() {
   found=$(grep -r "bun\.sh/install" "${SCAN_DIR}" \
     --include="Dockerfile*" --include="*.sh" --include="*.yml" --include="*.yaml" \
+    --exclude-dir=node_modules --exclude-dir=.git \
     -l 2>/dev/null || true)
   if [ -n "$found" ]; then
     log_warn "curl|bash Bun install (IOC URL pattern) — replace with npm install -g bun@VERSION: ${found}"
+  else
+    log_ok "No curl|bash Bun install patterns found"
   fi
 }
 

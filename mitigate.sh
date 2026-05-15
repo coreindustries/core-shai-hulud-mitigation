@@ -30,23 +30,23 @@ log_warn()   { printf "${RED}[WARN]${NC}  %s\n" "$*"; }
 
 do_run() {
   if [ "$DRY_RUN" -eq 1 ]; then
-    echo "  would run: $*"
+    printf "  would run: %s\n" "$*"
   else
-    eval "$@"
+    "$@"
   fi
 }
 
-echo ""
+printf "\n"
 printf "${BOLD}Shai-Hulud Mitigation Script${NC}\n"
 echo "======================================================"
 echo ""
 
 # --- Step 1: Remove persistence hooks (MUST be first) ---
-echo "${BOLD}Step 1: Remove Wave 4 persistence hooks${NC}"
+printf "${BOLD}Step 1: Remove Wave 4 persistence hooks${NC}\n"
 for hook in ".claude/router_runtime.js" ".vscode/setup.mjs"; do
   if [ -f "$hook" ]; then
     log_action "Removing persistence hook: ${hook}"
-    do_run rm -f "\"$hook\""
+    do_run rm -f "$hook"
   else
     log_skip "Not found: ${hook}"
   fi
@@ -54,38 +54,62 @@ done
 echo ""
 
 # --- Step 2: Configure .npmrc ---
-echo "${BOLD}Step 2: Apply .npmrc mitigations${NC}"
+printf "${BOLD}Step 2: Apply .npmrc mitigations${NC}\n"
 NPMRC=".npmrc"
 if grep -q "block-exotic-subdeps" "$NPMRC" 2>/dev/null; then
   log_skip ".npmrc already has block-exotic-subdeps"
 else
   log_action "Adding block-exotic-subdeps=true to ${NPMRC}"
-  do_run "echo 'block-exotic-subdeps=true' >> \"$NPMRC\""
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf "  would run: echo 'block-exotic-subdeps=true' >> %s\n" "$NPMRC"
+  else
+    printf 'block-exotic-subdeps=true\n' >> "$NPMRC"
+  fi
 fi
 echo ""
 
 # --- Step 3: Check for compromised packages ---
-echo "${BOLD}Step 3: Check for compromised TanStack packages${NC}"
-COMPROMISED_TANSTACK="@tanstack/react-router@1.169.5 @tanstack/react-router@1.169.8"
-if [ -d "node_modules/@tanstack/react-router" ] && command -v node >/dev/null 2>&1; then
-  ver=$(node -e "try{process.stdout.write(require('./node_modules/@tanstack/react-router/package.json').version||'')}catch(e){}" 2>/dev/null || true)
-  case "$ver" in
-    "1.169.5"|"1.169.8")
-      log_warn "COMPROMISED @tanstack/react-router@${ver} is installed!"
-      log_info "Remove node_modules and reinstall from a clean, unpoisoned cache:"
-      log_info "  rm -rf node_modules && pnpm store prune && pnpm install"
-      ;;
-    *)
-      log_skip "@tanstack/react-router@${ver} — not a known compromised version"
-      ;;
-  esac
-else
-  log_skip "node_modules/@tanstack/react-router not found"
-fi
+printf "${BOLD}Step 3: Check for compromised TanStack and Wave 4 packages${NC}\n"
+pkg_ver() {
+  pjson="node_modules/${1}/package.json"
+  if [ -f "$pjson" ] && command -v node >/dev/null 2>&1; then
+    PKGJSON="$pjson" node -e \
+      "try{process.stdout.write(require(process.env.PKGJSON).version||'')}catch(e){}" \
+      2>/dev/null || true
+  fi
+}
+rt_ver=$(pkg_ver "@tanstack/react-router")
+case "$rt_ver" in
+  "1.169.5"|"1.169.8")
+    log_warn "COMPROMISED @tanstack/react-router@${rt_ver} is installed!"
+    log_info "Remove node_modules and reinstall from a clean, unpoisoned cache:"
+    log_info "  rm -rf node_modules && pnpm store prune && pnpm install"
+    ;;
+  "")
+    log_skip "@tanstack/react-router not found"
+    ;;
+  *)
+    log_skip "@tanstack/react-router@${rt_ver} — not a known compromised version"
+    ;;
+esac
+mis_ver=$(pkg_ver "@mistralai/mistralai")
+case "$mis_ver" in
+  "2.2.2"|"2.2.3"|"2.2.4")
+    log_warn "COMPROMISED @mistralai/mistralai@${mis_ver} is installed!"
+    log_info "Remove node_modules and reinstall from a clean, unpoisoned cache:"
+    log_info "  rm -rf node_modules && pnpm store prune && pnpm install"
+    ;;
+  "")
+    log_skip "@mistralai/mistralai not found"
+    ;;
+  *)
+    log_skip "@mistralai/mistralai@${mis_ver} — not a known compromised version"
+    ;;
+esac
 echo ""
 
 # --- Step 4: Prune pnpm store if pnpm is available ---
-echo "${BOLD}Step 4: Prune pnpm store (removes potentially poisoned cached artifacts)${NC}"
+printf "${BOLD}Step 4: Prune pnpm store (removes potentially poisoned cached artifacts)${NC}\n"
 if command -v pnpm >/dev/null 2>&1; then
   log_action "Running pnpm store prune"
   do_run pnpm store prune
@@ -95,7 +119,7 @@ fi
 echo ""
 
 # --- Step 5: DNS block reminder ---
-echo "${BOLD}Step 5: DNS-level blocking (manual action required)${NC}"
+printf "${BOLD}Step 5: DNS-level blocking (manual action required)${NC}\n"
 log_warn "Block these domains at your DNS/firewall:"
 log_info "  *.getsession.org"
 log_info "  api.masscan.cloud"
@@ -103,7 +127,7 @@ log_info "  git-tanstack.com"
 echo ""
 
 # --- Step 6: Credential rotation reminder ---
-echo "${BOLD}Step 6: Credential rotation checklist (manual — rotate in order)${NC}"
+printf "${BOLD}Step 6: Credential rotation checklist (manual — rotate in order)${NC}\n"
 log_warn "If any IOCs were found, rotate credentials in this order:"
 log_info "  1. npm publish tokens (revoke all, re-issue with minimal scope)"
 log_info "  2. GitHub PATs and fine-grained tokens"

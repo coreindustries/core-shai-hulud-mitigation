@@ -45,7 +45,7 @@ Shai-Hulud is a self-propagating npm supply chain worm documented in four waves 
 |------|------|-------|
 | `setup_bun.js` | 1/2 | Installs Bun runtime silently |
 | `bun_environment.js` | 1/2 | TruffleHog credential harvester |
-| `router_init.js` | 4 | SHA256: `ab4fcadaec49c03278063dd269ea5eef82d24f2124a8e15d7b90f2fea29c44d9c0dc2caf` |
+| `router_init.js` | 4 | SHA256: `ab4fcadaec49c03278063dd269ea5eef82d24f2124a8e15d7b90f2fea29c44d9` |
 | `.claude/router_runtime.js` | 4 | Claude Code shell hook — persistence |
 | `.vscode/setup.mjs` | 4 | VSCode startup hook — persistence |
 
