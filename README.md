@@ -204,6 +204,125 @@ The ICP canister endpoint (`cjn37-uyaaa-aaaac-qgnva-cai`) uses end-to-end encryp
 
 ---
 
+## Network Blocking
+
+The worm uses three exfiltration channels with different blocking characteristics:
+
+| Channel | Domains | Blockable? | Notes |
+|---|---|---|---|
+| Session messenger | `*.getsession.org` | ✅ DNS/hosts | Deliberate — legitimate privacy app used as cover |
+| Attacker C2 | `masscan.cloud`, `git-tanstack.com` | ✅ DNS/hosts | No legitimate use — block unconditionally |
+| ICP canister | `ic0.app` | ✅ DNS/hosts | Blocks all ICP dapps — acceptable tradeoff |
+| GitHub dead-drops | `api.github.com` | ❌ Monitor only | Blocks CI/CD if blocked — use anomaly detection instead |
+| Hardcoded IPs | `83.142.209.194`, `94.154.172.43` | ✅ Firewall L3 | Bypasses DNS — must block at IP level separately |
+
+### Why DNS-based firewall rules may not be enough
+
+If **Tailscale** (or any VPN) is active on the host, it intercepts DNS before your gateway sees it — routing queries through `100.100.100.100` (MagicDNS) and bypassing gateway-level domain block lists entirely. Verify with:
+
+```sh
+scutil --dns | grep nameserver | head -5
+# If you see 100.100.100.100, Tailscale is your resolver — gateway rules won't fire
+```
+
+### `/etc/hosts` — host-level blocking (Tailscale-proof)
+
+Works regardless of DNS resolver. Takes effect immediately, no firewall config required.
+
+```sh
+sudo tee -a /etc/hosts <<'EOF'
+# Shai-Hulud IOC blocks — CVE-2026-45321
+0.0.0.0 masscan.cloud
+0.0.0.0 zero.masscan.cloud
+0.0.0.0 api.masscan.cloud
+0.0.0.0 git-tanstack.com
+0.0.0.0 getsession.org
+0.0.0.0 filev2.getsession.org
+0.0.0.0 seed1.getsession.org
+0.0.0.0 seed2.getsession.org
+0.0.0.0 seed3.getsession.org
+0.0.0.0 ic0.app
+EOF
+```
+
+Flush DNS cache after applying:
+
+```sh
+# macOS
+sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
+
+# Linux (systemd-resolved)
+sudo systemctl restart systemd-resolved
+```
+
+Validate with `./validate-blocks.sh` (see below).
+
+### Docker containers
+
+Containers don't inherit the host `/etc/hosts`. Add to every `docker-compose.yml`:
+
+```yaml
+extra_hosts:
+  - "masscan.cloud:0.0.0.0"
+  - "zero.masscan.cloud:0.0.0.0"
+  - "api.masscan.cloud:0.0.0.0"
+  - "git-tanstack.com:0.0.0.0"
+  - "getsession.org:0.0.0.0"
+  - "filev2.getsession.org:0.0.0.0"
+  - "seed1.getsession.org:0.0.0.0"
+  - "seed2.getsession.org:0.0.0.0"
+  - "seed3.getsession.org:0.0.0.0"
+  - "ic0.app:0.0.0.0"
+```
+
+### UniFi / gateway firewall
+
+Domain-based rules in UniFi work when DNS flows through the gateway. Enter apex domains only — UniFi matches subdomains automatically:
+
+```
+getsession.org
+masscan.cloud
+git-tanstack.com
+ic0.app
+```
+
+Also create a separate **IP Group** rule for hardcoded IPs that bypass DNS:
+
+```
+83.142.209.194
+94.154.172.43
+```
+
+Ensure the Shai-Hulud policy sits **above** any `Allow All Traffic` rule in the Internal → External zone matrix.
+
+### GitHub dead-drop monitoring (cannot be blocked)
+
+The worm routes exfiltration through `api.github.com` using stolen tokens — indistinguishable from normal traffic at the network layer. Hunt behaviorally instead:
+
+- Alert on unexpected repository creation events in your GitHub org
+- Flag outbound GraphQL POST requests to `api.github.com` from CI runners outside your release workflow
+- Search your org for repos with description containing `Shai-Hulud` or `Mini Shai-Hulud has Appeared`
+- Check for commits authored by `claude@users.noreply.github.com` you didn't make
+
+### Dead man's switch — check BEFORE revoking any tokens
+
+The worm installs a `gh-token-monitor` daemon that executes `rm -rf ~/` if it detects token revocation. **Disable this before rotating credentials:**
+
+```sh
+# macOS — check for LaunchAgent
+launchctl list | grep gh-token-monitor
+ls ~/Library/LaunchAgents/ | grep gh-token-monitor
+
+# Linux — check for systemd user service
+systemctl --user list-units | grep gh-token-monitor
+ls ~/.local/bin/gh-token-monitor.sh
+ls ~/.config/gh-token-monitor/
+```
+
+If found: stop the service first, then rotate. Wrong order = wiped home directory.
+
+---
+
 ## Preventive Configuration
 
 ### `.npmrc` — apply to every project
