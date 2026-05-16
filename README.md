@@ -167,16 +167,166 @@ grep -E "shellSnapshot|router_runtime|bun_environment|setup_bun|worker-service|w
   .claude/settings.local.json 2>/dev/null
 ```
 
-### Step 2 — Rotate Credentials (in order)
+### Step 2 — Check for Worm-Created Exfil Repos
 
-1. npm publish tokens — revoke all, re-issue with minimal scope
-2. GitHub PATs and fine-grained tokens
-3. GitHub Actions OIDC configurations — pin to specific workflow + branch
-4. AWS credentials — check IMDS/ECS logs if running in AWS
-5. Anthropic API keys (if agentic workflows run on the affected host)
-6. All other secrets stored in environment variables or secret managers
+Before revoking tokens, search for dead-drop repos the worm may have created using your stolen credentials. These contain your exfiltrated secrets and must be deleted:
 
-### Step 3 — Scan
+```sh
+gh repo list --limit 50 --json name,description \
+  | jq '.[] | select(.description | test("Shai-Hulud|Mini Shai|siridar|tleilaxu|beautifulcastle|OhNoWhatsGoingOn"; "i"))'
+```
+
+Delete any hits immediately.
+
+---
+
+### Step 3 — Rotate GitHub Tokens
+
+#### 3a — Audit existing tokens
+
+```sh
+# Check what's currently authorized on this machine
+gh auth status
+
+# Check npm tokens (worm can steal and use these to republish)
+npm token list
+```
+
+#### 3b — Revoke all tokens in GitHub UI
+
+> **Use the browser, not the CLI** — a compromised CLI token could intercept revocation attempts.
+
+- Fine-grained tokens: **github.com/settings/personal-access-tokens**
+- Classic tokens: **github.com/settings/tokens**
+- Org-level approvals: **github.com/organizations/YOUR_ORG/settings/personal-access-tokens**
+
+Revoke everything. If a token has an unfamiliar name or was created during May 11–15 2026, treat it as worm-issued.
+
+#### 3c — Reissue with minimal scope
+
+Create new fine-grained tokens at **github.com/settings/personal-access-tokens/new**:
+
+- **Expiration**: 90 days maximum — set a calendar reminder
+- **Resource owner**: your org, not personal account
+- **Repository access**: specific repos only, never "All repositories"
+- **Permissions**: minimum required — avoid `workflow` scope unless essential
+
+For CI/CD: use **GitHub Actions OIDC** instead of stored PATs — eliminates long-lived tokens entirely.
+
+#### 3d — Update token everywhere it lives
+
+```sh
+# Re-authenticate gh CLI
+gh auth login
+
+# Scan for hardcoded tokens in local repos
+grep -r "ghp_\|gho_\|github_pat_" ~/projects \
+  --include="*.env" \
+  --include="*.yml" \
+  --include="*.yaml" \
+  --include="*.json" \
+  -l 2>/dev/null
+```
+
+Also update:
+- GitHub Actions secrets (repo and org level)
+- Local `.env` files
+- Any secret managers (AWS Secrets Manager, HashiCorp Vault, `chamber`)
+- Any automation tools with GitHub integrations (n8n, etc.)
+
+#### 3e — Verify old token is dead
+
+```sh
+# Must return 401 — if it returns 200 the revocation failed
+curl -H "Authorization: token YOUR_OLD_TOKEN" https://api.github.com/user
+```
+
+#### 3f — Check npm publish history
+
+The worm self-propagates by republishing packages your account controls. Check for unauthorized publishes in the May 11–15 window:
+
+```sh
+# List packages your org controls
+npm access list packages YOUR_ORG 2>/dev/null
+
+# Check publish timestamps on each — flag anything you don't recognize
+npm view PACKAGE_NAME time --json | tail -5
+```
+
+If any package shows an unexpected publish timestamp, unpublish immediately:
+
+```sh
+npm unpublish PACKAGE_NAME@VERSION
+```
+
+---
+
+### Step 4 — Rotate AWS Credentials
+
+The worm specifically targets AWS IMDS (`169.254.169.254`), ECS task metadata (`169.254.170.2`), and local credential files.
+
+#### 4a — Identify exposed credentials
+
+```sh
+# Check what credential sources exist on this machine
+cat ~/.aws/credentials
+env | grep -i aws
+cat ~/.aws/config
+```
+
+Also check if the machine ran in AWS during the exposure window — if so, assume IMDS-derived credentials were harvested.
+
+#### 4b — Revoke in AWS Console
+
+Go to **IAM → Users → Security credentials** for every IAM user that had keys on the affected host:
+
+1. Click **Make inactive** on the old key first (don't delete yet — lets you audit CloudTrail)
+2. Create a new access key
+3. Update all consumers
+4. Then **Delete** the old key
+
+For IAM roles (EC2, ECS, Lambda): roles use short-lived credentials via IMDS — no rotation needed, but **audit CloudTrail** for any API calls made with those credentials during May 11–15.
+
+#### 4c — Audit CloudTrail for unauthorized activity
+
+```sh
+# Check for API calls from your region during the exposure window
+aws cloudtrail lookup-events \
+  --start-time 2026-05-11T00:00:00Z \
+  --end-time 2026-05-15T23:59:59Z \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=CreateRepository \
+  --query 'Events[*].{Time:EventTime,User:Username,Event:EventName}' \
+  --output table
+```
+
+Specifically look for:
+- `CreateRepository` — worm creates dead-drop repos
+- `PutSecretValue` / `GetSecretValue` — credential harvesting from Secrets Manager
+- `AssumeRole` — lateral movement
+- Any calls from unfamiliar IP addresses or user agents
+
+#### 4d — Update credentials everywhere
+
+```sh
+# Update local AWS config
+aws configure
+
+# If using aws-vault (as per core-ai-template setup)
+aws-vault remove PROFILE_NAME
+aws-vault add PROFILE_NAME
+
+# If using chamber
+chamber write SERVICE KEY VALUE
+```
+
+Also rotate:
+- Any AWS credentials stored in GitHub Actions secrets
+- ECS task definition environment variables
+- EC2 instance profile assignments if roles were over-permissioned
+
+---
+
+### Step 5 — Scan
 
 ```sh
 ./scan.sh ~/path/to/repo
@@ -184,7 +334,15 @@ grep -E "shellSnapshot|router_runtime|bun_environment|setup_bun|worker-service|w
 ./scan.sh ~/projects/ --global
 ```
 
-### Step 4 — Clean pnpm Store (Wave 4 cache poisoning)
+### Step 6 — Validate Network Blocks
+
+```sh
+./validate-blocks.sh
+```
+
+All IOC destinations should return `[BLOCKED]`. See [Network Blocking](#network-blocking) for setup.
+
+### Step 7 — Clean pnpm Store (Wave 4 cache poisoning)
 
 ```sh
 rm -rf node_modules
@@ -192,15 +350,25 @@ pnpm store prune
 pnpm install --frozen-lockfile
 ```
 
-### Step 5 — Block Exfiltration Domains at DNS
+### Step 8 — Block Exfiltration Domains
 
-```
-*.getsession.org
-api.masscan.cloud
-git-tanstack.com
+Apply `/etc/hosts` blocks and firewall rules per the [Network Blocking](#network-blocking) section. Validate with `./validate-blocks.sh`.
+
+### Step 9 — Rotate Remaining Secrets (in order)
+
+1. Anthropic API keys — **console.anthropic.com → API Keys**
+2. Any other API keys accessible from the affected host (Stripe, Slack, Twilio, etc.)
+3. SSH keys — generate new keypairs, update `~/.ssh/authorized_keys` on all servers, update GitHub deploy keys
+4. Kubernetes secrets if the host had `kubectl` access
+5. HashiCorp Vault tokens if `127.0.0.1:8200` was accessible
+
+```sh
+./scan.sh ~/path/to/repo
+# or for all repos:
+./scan.sh ~/projects/ --global
 ```
 
-The ICP canister endpoint (`cjn37-uyaaa-aaaac-qgnva-cai`) uses end-to-end encrypted routing — IP/domain blocking is the only network-layer mitigation available.
+
 
 ---
 
